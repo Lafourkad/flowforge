@@ -27,3 +27,8 @@ Thumbs.db
 *.avi
 temp/
 /models/
+
+# Build artifacts
+dist/
+build/
+*.spec
