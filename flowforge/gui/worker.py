@@ -440,28 +440,30 @@ class PlaybackWorker(QThread):
             return False
         
         try:
-            # Write temporary VapourSynth script
-            temp_vs = Path(tempfile.mktemp(suffix=".vpy"))
+            # Write VapourSynth script to FlowForge dir (short filename, no path issues)
+            script_dir = Path(mpv_path).parent  # Won't work - use FlowForge dir
+            flowforge_dir = Path(settings.get("rife_binary")).parent.parent
+            temp_vs = flowforge_dir / "flowforge_play.vpy"
             with open(temp_vs, 'w', encoding='utf-8') as f:
                 f.write(vs_script)
             
-            # Launch mpv with VapourSynth filter
+            # Launch mpv from the script directory to avoid path parsing issues
+            # mpv's vapoursynth filter chokes on C: in paths, so we cd there first
             cmd = [
                 mpv_path,
                 "--no-config",
                 "--hwdec=no",
-                f"--vf=vapoursynth:{str(temp_vs)}",
+                f"--vf=vapoursynth:{temp_vs.name}",
                 str(self.video_path),
             ]
             
-            subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0)
+            subprocess.Popen(
+                cmd,
+                cwd=str(flowforge_dir),
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+            )
             
-            # Clean up temp file after a delay (mpv should have loaded it)
-            self.msleep(2000)
-            try:
-                temp_vs.unlink()
-            except OSError:
-                pass
+            # Don't delete the script - mpv needs it while playing
             
             return True
         
