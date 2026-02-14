@@ -1,140 +1,205 @@
-# FlowForge 🎬
+# FlowForge - Video Frame Interpolation GUI
 
-**Open-source, GPU-accelerated video frame interpolation.**  
-Turn choppy 24fps video into buttery smooth 60fps+ playback.
+A modern PyQt6 GUI for FlowForge, providing GPU-accelerated video frame interpolation using RIFE (Real-time Intermediate Flow Estimation).
 
-Free alternative to SVP 4 Pro.
+## Features
 
-<p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
-  <img src="https://img.shields.io/badge/python-3.11+-green.svg" alt="Python">
-  <img src="https://img.shields.io/badge/GPU-NVIDIA%20RTX-76B900.svg" alt="GPU">
-</p>
+### 🎬 **Modern Dark Interface**
+- HandBrake/DaVinci Resolve inspired dark theme
+- Intuitive drag-and-drop video loading
+- Real-time video information display
+- Responsive layout with status tracking
 
----
+### ⚡ **Real-Time Playback** 
+- Instant preview with VapourSynth + mpv integration
+- Multiple presets: Film (24→60fps), Anime (24→60fps), Sports (30→60fps), Smooth (→144fps), Custom
+- Configurable scene detection with threshold control
+- GPU thread optimization (1-4 threads)
+- RIFE model selection
 
-## ✨ Features
+### 🚀 **Batch Export**
+- Full processing pipeline: extract → RIFE → encode
+- Real-time progress tracking with detailed statistics
+- Multiple encoding presets: Quality, Balanced, Fast
+- NVENC hardware encoding support
+- Cancellable operations with proper cleanup
 
-- **Frame Interpolation** — Convert 24/30fps video to 60/120/144fps using RIFE neural networks
-- **Real-Time Playback** — Watch any video with smooth interpolation via mpv + VapourSynth
-- **GPU Accelerated** — Vulkan backend works with NVIDIA, AMD, and Intel GPUs
-- **Scene Detection** — Smart scene change detection prevents artifacts at cuts
-- **Presets** — Film, anime, sports, and custom profiles
-- **Batch Processing** — Convert entire video files for later playback
-- **Cross-Platform** — Linux, Windows, macOS
+### ⚙️ **Advanced Settings**
+- Auto-detection of RIFE binary, models, and mpv
+- Platform detection (Windows/WSL) with path conversion
+- GPU information and selection
+- Persistent configuration in `~/.flowforge/config.json`
+- Comprehensive settings dialog
 
-## 🚀 Quick Start
+## Requirements
 
-### Install
+### Software Dependencies
+- **Python 3.8+** with PyQt6
+- **RIFE ncnn-vulkan** - GPU-accelerated RIFE implementation
+- **mpv** - Video player with VapourSynth support
+- **VapourSynth** - Video processing framework
+- **RIFE VapourSynth plugin** - For real-time interpolation
+- **FFmpeg** - Video encoding/decoding
 
+### Hardware Requirements  
+- **NVIDIA GPU** with Vulkan support (RTX series recommended)
+- **8GB+ system RAM** (16GB+ recommended for 4K videos)
+- **Fast storage** - SSD recommended for temp files
+
+## Installation
+
+### 1. Clone and Install Python Dependencies
 ```bash
-pip install flowforge
-flowforge setup  # Downloads RIFE model (~430MB)
+git clone <repository-url>
+cd flowforge
+pip install -r requirements.txt
 ```
 
-### Interpolate a Video File
-
-```bash
-# Double the frame rate (24fps → 48fps)
-flowforge interpolate movie.mkv -o smooth.mkv --multiplier 2
-
-# Target specific FPS
-flowforge interpolate movie.mkv -o smooth.mkv --fps 60
-
-# Use NVIDIA hardware encoding
-flowforge interpolate movie.mkv -o smooth.mkv --fps 60 --nvenc
+### 2. Setup RIFE Components
+Place the following in your FlowForge directory structure:
 ```
+FlowForge/
+├── bin/rife-ncnn-vulkan.exe          # RIFE binary
+├── models/rife-v4.6/                 # RIFE model files
+├── vs-plugins/librife.dll             # VapourSynth plugin
+└── flowforge_win.py                   # Existing batch script
+```
+
+### 3. Install Supporting Software
+- **mpv**: Install with VapourSynth support (e.g., from SVP package)
+- **FFmpeg**: Standard installation with libx264/NVENC support
+
+## Usage
+
+### Starting the GUI
+```bash
+# Method 1: Module execution
+python -m flowforge.gui
+
+# Method 2: Direct launcher
+python run_gui.py
+
+# Method 3: From package
+cd flowforge && python -m gui
+```
+
+### Basic Workflow
+1. **Load Video**: Drag & drop video file or use "Browse Files"
+2. **Configure Playback**: 
+   - Select preset (Film/Anime/Sports/Smooth/Custom)
+   - Adjust scene detection threshold
+   - Set GPU thread count
+3. **Preview**: Click "▶️ Play Real-Time" for mpv preview
+4. **Setup Export**:
+   - Choose output path
+   - Set FPS multiplier or target FPS
+   - Select encoding preset
+   - Enable/disable NVENC
+5. **Process**: Click "🎬 Export Video" and monitor progress
+
+### Settings Configuration
+Access via **Settings → Preferences**:
+
+- **Paths Tab**: Configure RIFE binary, model directory, mpv, VapourSynth plugin
+- **Processing Tab**: Set default GPU, threads, scene detection, presets
+- **Export Tab**: Configure encoding presets, quality, NVENC defaults
+- **Advanced Tab**: View platform info, GPU detection, version information
+
+## Technical Details
+
+### Architecture
+- **PyQt6** - Modern cross-platform GUI framework
+- **QThread Workers** - Non-blocking background processing
+- **Settings Persistence** - JSON configuration management
+- **Platform Detection** - Automatic WSL↔Windows path conversion
+
+### Processing Pipeline
+1. **Analysis**: FFprobe metadata extraction
+2. **Frame Extraction**: FFmpeg PNG sequence generation
+3. **RIFE Interpolation**: GPU-accelerated frame generation
+4. **Encoding**: FFmpeg with x264/NVENC to final video
+5. **Cleanup**: Automatic temporary file removal
 
 ### Real-Time Playback
+- Generates VapourSynth script dynamically
+- Launches mpv with RIFE filter applied
+- No intermediate files - direct GPU processing
+- Configurable quality vs. speed tradeoffs
 
-```bash
-# Play with smooth interpolation
-flowforge play movie.mkv --preset film
-
-# Configure mpv integration
-flowforge configure-mpv
-```
-
-### Video Info
-
-```bash
-flowforge info movie.mkv --estimate
-```
-
-## 📋 Requirements
-
-- **Python** 3.11+
-- **FFmpeg** (for video encoding/decoding)
-- **GPU** with Vulkan support (NVIDIA RTX recommended)
-- **mpv** + VapourSynth (for real-time playback)
-
-## 🎮 Presets
-
-| Preset | Source FPS | Target FPS | Best For |
-|--------|-----------|------------|----------|
-| `film` | 24fps | 60fps | Movies, TV shows |
-| `anime` | 24fps | 60fps | Animation (strong artifact suppression) |
-| `sports` | 30fps | 60fps | Fast motion, live action |
-| `smooth` | any | 144fps | Maximum smoothness |
-| `custom` | any | any | Your own settings |
-
-## 🔧 How It Works
-
-FlowForge uses [RIFE](https://github.com/megvii-research/ECCV2022-RIFE) (Real-Time Intermediate Flow Estimation) to generate intermediate frames between existing ones. The ncnn-vulkan implementation runs on any GPU with Vulkan support — no CUDA toolkit needed.
-
-```
-Frame 1 ──┐
-           ├── RIFE ──→ Interpolated Frame
-Frame 2 ──┘
-```
-
-For a 2x multiplier, one new frame is generated between each pair of original frames, doubling the frame rate. 4x generates 3 intermediate frames, etc.
-
-**Scene detection** analyzes frame similarity to find cuts. At scene boundaries, interpolation is skipped to prevent ghosting artifacts.
-
-## 🏗️ Architecture
+## File Structure
 
 ```
 flowforge/
-├── core/           # Interpolation engine
-│   ├── rife.py          # RIFE model wrapper (ncnn-vulkan)
-│   ├── interpolator.py  # Video interpolation pipeline
-│   ├── ffmpeg.py        # FFmpeg utilities
-│   └── scene_detect.py  # Scene change detection
-├── playback/       # Real-time playback
-│   ├── launcher.py      # mpv launcher
-│   ├── presets.py       # Interpolation presets
-│   └── vapoursynth_filter.py  # VapourSynth RIFE filter
-├── gui/            # GUI application (Phase 3)
-└── utils/          # Utilities
-    └── download.py      # Model downloader
+├── flowforge/
+│   ├── __init__.py
+│   └── gui/
+│       ├── __init__.py
+│       ├── __main__.py              # python -m flowforge.gui
+│       ├── main.py                  # Entry point and main()
+│       ├── app.py                   # QApplication with dark theme
+│       ├── main_window.py           # Main GUI window
+│       ├── settings.py              # Configuration management
+│       ├── worker.py                # Background processing threads
+│       └── widgets/
+│           ├── __init__.py
+│           ├── dragdrop.py          # Video drag & drop widget
+│           ├── progress.py          # Progress tracking widgets
+│           └── settings.py          # Settings dialog
+├── requirements.txt                 # PyQt6 dependencies
+├── run_gui.py                      # Simple launcher script
+└── README.md                       # This file
 ```
 
-## 📊 Performance
+## Integration with Existing Code
 
-Tested on NVIDIA RTX 4070 (12GB VRAM):
+The GUI seamlessly integrates with existing FlowForge components:
 
-| Resolution | Multiplier | Processing Speed |
-|-----------|------------|-----------------|
-| 1080p | 2x (24→48fps) | ~45 fps |
-| 1080p | 2x (24→60fps) | ~45 fps |
-| 1080p | 4x (24→96fps) | ~15 fps |
-| 4K | 2x (24→48fps) | ~12 fps |
+- **`flowforge_win.py`** - Reuses batch processing logic and functions
+- **`rife.vpy`** - Uses as template for dynamic VapourSynth script generation
+- **Platform Detection** - Handles WSL/Windows path conversion automatically
+- **Settings** - Inherits and extends existing configuration approach
 
-*Real-time playback requires processing speed > target FPS.*
+## Troubleshooting
 
-## 🤝 Contributing
+### Common Issues
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+**"RIFE binary not found"**
+- Ensure `rife-ncnn-vulkan.exe` exists and is executable
+- Check Settings → Paths → RIFE Binary path
+- Verify NVIDIA drivers and Vulkan support
 
-## 📄 License
+**"mpv failed to start"**
+- Verify mpv installation with VapourSynth support
+- Check Settings → Paths → mpv Path
+- Ensure VapourSynth plugin path is correct
 
-MIT License — see [LICENSE](LICENSE).
+**"No GPU detected"**
+- Install NVIDIA drivers with CUDA support
+- Run `nvidia-smi` to verify GPU visibility
+- Check Windows/WSL GPU passthrough if applicable
 
-## 🙏 Credits
+**Processing stuck or slow**
+- Check available disk space for temp files
+- Verify GPU isn't being used by other applications
+- Try reducing thread count or GPU count
 
-- [RIFE](https://github.com/megvii-research/ECCV2022-RIFE) — Frame interpolation model by Megvii Research
-- [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan) — Vulkan implementation by nihui
-- [FFmpeg](https://ffmpeg.org/) — Video processing
-- [mpv](https://mpv.io/) — Video player
-- [VapourSynth](https://www.vapoursynth.com/) — Video processing framework
+### Log Files
+- Application logs: Check console output
+- Settings file: `~/.flowforge/config.json`
+- Temporary processing: System temp directory (auto-cleaned)
+
+## Performance Tips
+
+- **SSD Storage**: Use fast storage for temporary frame files
+- **GPU Memory**: Higher VRAM allows larger frame batches
+- **System RAM**: 16GB+ recommended for 4K processing
+- **Thread Tuning**: Start with 1:2:2, adjust based on system
+- **Scene Detection**: Can improve quality but adds processing time
+
+## License
+
+This project integrates with RIFE and other open-source components. Please respect their respective licenses.
+
+---
+
+**FlowForge GUI v1.0** - Modern video frame interpolation made easy.

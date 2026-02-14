@@ -1,6 +1,2 @@
-numpy>=1.24
-opencv-python-headless>=4.8
-tqdm>=4.65
-click>=8.1
-requests>=2.31
-scikit-image>=0.21
+PyQt6==6.8.0
+PyQt6-Qt6==6.8.0
