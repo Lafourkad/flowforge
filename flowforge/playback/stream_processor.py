@@ -1,861 +1,592 @@
-"""Streaming interpolation processor for real-time RIFE interpolation.
+"""Chunked streaming interpolation for real-time playback.
 
-This module provides the core streaming interpolation functionality that powers
-FlowForge's real-time video playback. It handles the pipeline:
-FFmpeg decode → RIFE interpolate → FFmpeg encode → mpv
+Architecture:
+  - Video is split into N-second chunks
+  - Each chunk: extract frames → RIFE batch interpolation → encode to video
+  - mpv plays chunks via playlist, starting as soon as the first chunk is ready
+  - Processing stays ahead of playback
+
+This uses RIFE in batch mode (one call per chunk) which is 100x faster
+than per-frame-pair invocations.
 """
 
+import json
 import logging
+import math
 import os
-import queue
+import shutil
+import signal
 import subprocess
-import tempfile
+import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import numpy as np
-import psutil
-
-from .presets import InterpolationPreset
-
 logger = logging.getLogger(__name__)
+
+# Defaults
+DEFAULT_CHUNK_SECONDS = 30
+DEFAULT_BUFFER_CHUNKS = 2  # Process this many chunks ahead before starting mpv
+DEFAULT_MULTIPLIER = 2
+DEFAULT_THREADS = "1:3:3"
+
+
+def to_win_path(p: str) -> str:
+    """Convert WSL/Linux path to Windows path for .exe binaries."""
+    p = str(p)
+    if p.startswith("/mnt/"):
+        drive = p[5]
+        rest = p[7:].replace("/", "\\")
+        return f"{drive.upper()}:\\{rest}"
+    return p
+
+
+def is_wsl() -> bool:
+    """Detect if running under WSL."""
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except:
+        return False
 
 
 @dataclass
-class StreamStats:
-    """Statistics for stream processing."""
-    frames_input: int = 0
-    frames_output: int = 0
-    frames_interpolated: int = 0
-    frames_dropped: int = 0
-    scene_changes: int = 0
+class PlaybackStats:
+    """Live playback statistics."""
+    total_chunks: int = 0
+    chunks_extracted: int = 0
+    chunks_interpolated: int = 0
+    chunks_encoded: int = 0
+    chunks_played: int = 0
     
-    # Performance metrics
-    input_fps: float = 0.0
-    output_fps: float = 0.0
-    processing_fps: float = 0.0
-    avg_latency_ms: float = 0.0
+    total_frames_in: int = 0
+    total_frames_out: int = 0
     
-    # Resource usage
-    cpu_percent: float = 0.0
-    memory_mb: float = 0.0
-    gpu_utilization: float = 0.0
+    rife_fps: float = 0.0
+    extract_time: float = 0.0
+    rife_time: float = 0.0
+    encode_time: float = 0.0
     
-    # Buffer status
-    staging_frames: int = 0
-    output_frames: int = 0
-    buffer_overruns: int = 0
-    
-    # Timing
     start_time: float = 0.0
-    last_update: float = 0.0
-    
+    playback_started: bool = False
+    error: Optional[str] = None
+
     @property
-    def uptime_seconds(self) -> float:
-        """Stream uptime in seconds."""
-        return time.time() - self.start_time
-    
+    def elapsed(self) -> float:
+        return time.time() - self.start_time if self.start_time else 0
+
     @property
-    def interpolation_ratio(self) -> float:
-        """Ratio of interpolated to total frames."""
-        return self.frames_interpolated / max(1, self.frames_output)
+    def pipeline_progress(self) -> str:
+        return (f"E:{self.chunks_extracted}/{self.total_chunks} "
+                f"R:{self.chunks_interpolated}/{self.total_chunks} "
+                f"C:{self.chunks_encoded}/{self.total_chunks}")
 
 
-class SlidingWindowBuffer:
-    """Manages sliding window buffer for frame processing."""
-    
-    def __init__(self, window_size: int = 8):
-        """Initialize sliding window buffer.
-        
-        Args:
-            window_size: Size of the sliding window
-        """
-        self.window_size = window_size
-        self.frames = {}  # frame_number -> frame_data
-        self.timestamps = {}  # frame_number -> timestamp
-        self.staging_dir = None
-        self.output_dir = None
-        self.current_frame = 0
-        
-    def initialize_dirs(self) -> Tuple[Path, Path]:
-        """Initialize staging and output directories.
-        
-        Returns:
-            Tuple of (staging_dir, output_dir)
-        """
-        self.staging_dir = Path(tempfile.mkdtemp(prefix="flowforge_staging_"))
-        self.output_dir = Path(tempfile.mkdtemp(prefix="flowforge_output_"))
-        return self.staging_dir, self.output_dir
-    
-    def add_frame(self, frame_number: int, frame_data: bytes, timestamp: float) -> bool:
-        """Add frame to buffer.
-        
-        Args:
-            frame_number: Frame sequence number
-            frame_data: Frame image data
-            timestamp: Frame timestamp
-            
-        Returns:
-            True if frame was added successfully
-        """
-        self.frames[frame_number] = frame_data
-        self.timestamps[frame_number] = timestamp
-        
-        # Write frame to staging directory
-        if self.staging_dir:
-            frame_path = self.staging_dir / f"frame_{frame_number:08d}.png"
-            try:
-                with open(frame_path, 'wb') as f:
-                    f.write(frame_data)
-            except Exception as e:
-                logger.error(f"Failed to write staging frame {frame_number}: {e}")
-                return False
-        
-        # Cleanup old frames outside window
-        cutoff = frame_number - self.window_size
-        frames_to_remove = [fn for fn in self.frames.keys() if fn < cutoff]
-        for fn in frames_to_remove:
-            self._cleanup_frame(fn)
-        
-        return True
-    
-    def get_frame_pair(self, frame_number: int) -> Optional[Tuple[int, int]]:
-        """Get frame pair for interpolation.
-        
-        Args:
-            frame_number: Current frame number
-            
-        Returns:
-            Tuple of (frame1_number, frame2_number) or None
-        """
-        if frame_number in self.frames and (frame_number - 1) in self.frames:
-            return frame_number - 1, frame_number
-        return None
-    
-    def has_frame(self, frame_number: int) -> bool:
-        """Check if frame is in buffer.
-        
-        Args:
-            frame_number: Frame number to check
-            
-        Returns:
-            True if frame exists in buffer
-        """
-        return frame_number in self.frames
-    
-    def get_staging_path(self, frame_number: int) -> Optional[Path]:
-        """Get staging file path for frame.
-        
-        Args:
-            frame_number: Frame number
-            
-        Returns:
-            Path to staging file or None
-        """
-        if self.staging_dir and frame_number in self.frames:
-            return self.staging_dir / f"frame_{frame_number:08d}.png"
-        return None
-    
-    def get_output_pattern(self, base_frame: int) -> str:
-        """Get output filename pattern for interpolated frames.
-        
-        Args:
-            base_frame: Base frame number for interpolation
-            
-        Returns:
-            Output filename pattern
-        """
-        if self.output_dir:
-            return str(self.output_dir / f"interp_{base_frame:08d}_%04d.png")
-        return ""
-    
-    def _cleanup_frame(self, frame_number: int) -> None:
-        """Remove frame from buffer and cleanup files.
-        
-        Args:
-            frame_number: Frame number to cleanup
-        """
-        # Remove from memory
-        self.frames.pop(frame_number, None)
-        self.timestamps.pop(frame_number, None)
-        
-        # Remove staging file
-        if self.staging_dir:
-            staging_file = self.staging_dir / f"frame_{frame_number:08d}.png"
-            try:
-                if staging_file.exists():
-                    staging_file.unlink()
-            except Exception:
-                pass
-    
-    def cleanup(self) -> None:
-        """Cleanup all temporary files and directories."""
-        import shutil
-        
-        for temp_dir in [self.staging_dir, self.output_dir]:
-            if temp_dir and temp_dir.exists():
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup {temp_dir}: {e}")
-        
-        self.frames.clear()
-        self.timestamps.clear()
+@dataclass  
+class VideoInfo:
+    """Probed video metadata."""
+    fps: float
+    width: int
+    height: int
+    duration: float
+    frame_count: int
+    codec: str
+    pix_fmt: str
+    audio_streams: List[Dict] = field(default_factory=list)
+
+    @property
+    def fps_rational(self) -> str:
+        """Get rational FPS string (e.g. 24000/1001)."""
+        # Common film/TV rates
+        if abs(self.fps - 23.976) < 0.01:
+            return "24000/1001"
+        if abs(self.fps - 29.97) < 0.01:
+            return "30000/1001"
+        if abs(self.fps - 59.94) < 0.01:
+            return "60000/1001"
+        return str(self.fps)
 
 
-class RIFEProcessor:
-    """RIFE binary processor for frame interpolation."""
+def probe_video(path: Path) -> VideoInfo:
+    """Get video metadata via ffprobe."""
+    r = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json",
+         "-show_streams", "-show_format", str(path)],
+        capture_output=True, text=True, check=True
+    )
+    d = json.loads(r.stdout)
     
-    def __init__(self, preset: InterpolationPreset, rife_binary_path: Path):
-        """Initialize RIFE processor.
-        
-        Args:
-            preset: Interpolation preset
-            rife_binary_path: Path to rife-ncnn-vulkan binary
-        """
-        self.preset = preset
-        self.rife_binary_path = rife_binary_path
-        self.process_pool = []  # For concurrent processing
-        
-        # Determine multiplier
-        if preset.multiplier:
-            self.multiplier = preset.multiplier
-        else:
-            # Calculate from target FPS (assume 24fps input for now)
-            self.multiplier = preset.target_fps / 24.0
-        
-        # Performance optimization
-        self.thread_count = min(4, psutil.cpu_count())
-        
-    def interpolate_pair(
-        self, 
-        staging_dir: Path, 
-        output_dir: Path,
-        frame1_num: int, 
-        frame2_num: int
-    ) -> List[Path]:
-        """Interpolate between two frames using RIFE binary.
-        
-        Args:
-            staging_dir: Directory containing input frames
-            output_dir: Directory for output frames
-            frame1_num: First frame number
-            frame2_num: Second frame number
-            
-        Returns:
-            List of paths to interpolated frames
-        """
-        try:
-            # Prepare input frames
-            frame1_path = staging_dir / f"frame_{frame1_num:08d}.png"
-            frame2_path = staging_dir / f"frame_{frame2_num:08d}.png"
-            
-            if not (frame1_path.exists() and frame2_path.exists()):
-                logger.warning(f"Missing input frames: {frame1_num}, {frame2_num}")
-                return []
-            
-            # Create pair directory
-            pair_dir = staging_dir / f"pair_{frame1_num}_{frame2_num}"
-            pair_dir.mkdir(exist_ok=True)
-            
-            # Copy frames to pair directory with RIFE naming convention
-            import shutil
-            shutil.copy2(frame1_path, pair_dir / "00000000.png")
-            shutil.copy2(frame2_path, pair_dir / "00000001.png")
-            
-            # Prepare output directory
-            output_pair_dir = output_dir / f"interp_{frame1_num}_{frame2_num}"
-            output_pair_dir.mkdir(exist_ok=True)
-            
-            # Build RIFE command
-            cmd = [
-                str(self.rife_binary_path),
-                "-i", str(pair_dir),
-                "-o", str(output_pair_dir),
-                "-n", str(int(self.multiplier)),
-                "-m", self.preset.model
-            ]
-            
-            # Add optional flags
-            if self.preset.tta:
-                cmd.append("-x")
-            if self.preset.uhd:
-                cmd.append("-u")
-            
-            # GPU settings
-            cmd.extend(["-g", "0"])  # Use first GPU
-            
-            # Threading settings
-            cmd.extend(["-j", f"{self.thread_count}:1:1"])
-            
-            logger.debug(f"Running RIFE: {' '.join(cmd)}")
-            
-            # Execute RIFE
-            start_time = time.time()
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10.0  # 10 second timeout per pair
-            )
-            
-            process_time = time.time() - start_time
-            
-            if result.returncode != 0:
-                logger.error(f"RIFE failed: {result.stderr}")
-                return []
-            
-            # Collect output frames
-            output_frames = []
-            for output_file in sorted(output_pair_dir.glob("*.png")):
-                output_frames.append(output_file)
-            
-            logger.debug(f"RIFE processed {frame1_num}->{frame2_num} in {process_time:.3f}s, "
-                        f"generated {len(output_frames)} frames")
-            
-            # Cleanup pair directory
-            shutil.rmtree(pair_dir, ignore_errors=True)
-            
-            return output_frames
-            
-        except subprocess.TimeoutExpired:
-            logger.error(f"RIFE timeout for frames {frame1_num}-{frame2_num}")
-            return []
-        except Exception as e:
-            logger.error(f"RIFE processing error: {e}")
-            return []
+    video_info = None
+    audio_streams = []
     
-    def estimate_processing_time(self) -> float:
-        """Estimate processing time per frame pair.
-        
-        Returns:
-            Estimated time in seconds
-        """
-        # Base processing times by quality
-        base_times = {
-            "rife-v4.6": 0.050,
-            "rife-v4.15-lite": 0.025
-        }
-        
-        base_time = base_times.get(self.preset.model, 0.040)
-        
-        # Factor in options
-        if self.preset.tta:
-            base_time *= 2.0
-        if self.preset.uhd:
-            base_time *= 1.5
-        
-        # Multiplier factor
-        base_time *= self.multiplier
-        
-        return base_time
+    for s in d["streams"]:
+        if s["codec_type"] == "video" and video_info is None:
+            fps_parts = s["r_frame_rate"].split("/")
+            fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else float(fps_parts[0])
+            duration = float(d["format"].get("duration", 0))
+            video_info = {
+                "fps": fps,
+                "width": int(s["width"]),
+                "height": int(s["height"]),
+                "duration": duration,
+                "frame_count": int(duration * fps),
+                "codec": s.get("codec_name", "unknown"),
+                "pix_fmt": s.get("pix_fmt", "unknown"),
+            }
+        elif s["codec_type"] == "audio":
+            audio_streams.append({
+                "index": s["index"],
+                "codec": s.get("codec_name", "?"),
+                "language": s.get("tags", {}).get("language", "?"),
+                "channels": s.get("channels", 0),
+            })
+    
+    if not video_info:
+        raise RuntimeError(f"No video stream found in {path}")
+    
+    return VideoInfo(**video_info, audio_streams=audio_streams)
 
 
-class StreamProcessor:
-    """Main streaming interpolation processor.
+class ChunkedStreamProcessor:
+    """Process video in chunks for near-real-time interpolated playback.
     
-    This class manages the complete pipeline:
-    1. FFmpeg decodes video frames to staging directory
-    2. RIFE processes frame pairs from staging to output directory
-    3. FFmpeg reads output frames and pipes to mpv
-    4. All happens concurrently with sliding window buffer management
+    Pipeline per chunk:
+        1. FFmpeg extracts frames to chunk_N/input/
+        2. RIFE interpolates batch: input/ → output/ 
+        3. FFmpeg encodes output/ → chunk_N.mkv (with audio from source)
+        4. mpv plays chunk_N.mkv from playlist
     """
-    
+
     def __init__(
         self,
-        preset: InterpolationPreset,
-        rife_binary_path: Path,
-        input_source: Union[str, Path],
-        stats_callback: Optional[Callable[[StreamStats], None]] = None
+        input_path: Path,
+        rife_binary: Path,
+        model_dir: Path,
+        mpv_path: Path,
+        work_dir: Path,
+        *,
+        chunk_seconds: int = DEFAULT_CHUNK_SECONDS,
+        buffer_chunks: int = DEFAULT_BUFFER_CHUNKS,
+        multiplier: int = DEFAULT_MULTIPLIER,
+        gpu: int = 0,
+        threads: str = DEFAULT_THREADS,
+        crf: int = 18,
+        preset_x264: str = "veryfast",  # fast encode for real-time
+        mpv_args: Optional[List[str]] = None,
+        stats_callback: Optional[Callable[[PlaybackStats], None]] = None,
     ):
-        """Initialize stream processor.
+        self.input_path = Path(input_path)
+        self.rife_binary = Path(rife_binary)
+        self.model_dir = Path(model_dir)
+        self.mpv_path = Path(mpv_path)
+        self.work_dir = Path(work_dir)
         
-        Args:
-            preset: Interpolation preset
-            rife_binary_path: Path to RIFE binary
-            input_source: Video input source (file path or stream URL)
-            stats_callback: Optional callback for statistics updates
-        """
-        self.preset = preset
-        self.rife_binary_path = rife_binary_path
-        self.input_source = Path(input_source)
+        self.chunk_seconds = chunk_seconds
+        self.buffer_chunks = buffer_chunks
+        self.multiplier = multiplier
+        self.gpu = gpu
+        self.threads = threads
+        self.crf = crf
+        self.preset_x264 = preset_x264
+        self.mpv_args = mpv_args or []
         self.stats_callback = stats_callback
         
-        # Components
-        self.buffer = SlidingWindowBuffer(preset.buffer_frames)
-        self.rife_processor = RIFEProcessor(preset, rife_binary_path)
-        
-        # Threading
-        self.decode_thread = None
-        self.interpolation_thread = None
-        self.encode_thread = None
-        self.stats_thread = None
-        
         # State
-        self.is_running = False
-        self.should_stop = threading.Event()
-        self.stats = StreamStats()
+        self.stats = PlaybackStats()
+        self._stop = threading.Event()
+        self._mpv_proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
         
-        # Queues for inter-thread communication
-        self.decode_queue = queue.Queue(maxsize=preset.max_queue_size)
-        self.interpolation_queue = queue.Queue(maxsize=preset.max_queue_size)
-        self.output_queue = queue.Queue(maxsize=preset.max_queue_size * 2)
+        # Paths
+        self.chunks_dir = self.work_dir / "chunks"
+        self.playlist_path = self.work_dir / "playlist.txt"
         
-        # Scene detection
-        self.last_frame_hash = None
+    def run(self) -> None:
+        """Run the full pipeline: process + playback. Blocks until done or stopped."""
+        t0 = time.time()
+        self.stats.start_time = t0
         
-        logger.info(f"StreamProcessor initialized: {preset.name} -> {preset.target_fps}fps")
-    
-    def start(self, output_pipe: Optional[int] = None) -> bool:
-        """Start streaming interpolation.
+        # Probe input
+        info = probe_video(self.input_path)
+        target_fps = info.fps * self.multiplier
         
-        Args:
-            output_pipe: Optional output pipe file descriptor
-            
-        Returns:
-            True if started successfully
-        """
-        if self.is_running:
-            logger.warning("Stream processor already running")
-            return False
+        logger.info(f"Input: {info.width}x{info.height} @ {info.fps:.3f}fps, {info.duration:.1f}s")
+        logger.info(f"Target: {target_fps:.2f}fps ({self.multiplier}x), chunks={self.chunk_seconds}s")
+        
+        # Calculate chunks
+        total_duration = info.duration
+        n_chunks = math.ceil(total_duration / self.chunk_seconds)
+        self.stats.total_chunks = n_chunks
+        
+        # Prepare work directory
+        if self.work_dir.exists():
+            shutil.rmtree(self.work_dir)
+        self.chunks_dir.mkdir(parents=True)
+        
+        # Initialize playlist
+        with open(self.playlist_path, "w") as f:
+            pass  # empty file, we append as chunks complete
+        
+        print(f"🎬 FlowForge Real-Time Playback")
+        print(f"{'=' * 55}")
+        print(f"📹 {info.width}x{info.height} @ {info.fps:.3f}fps → {target_fps:.2f}fps ({self.multiplier}x)")
+        print(f"📦 {n_chunks} chunks × {self.chunk_seconds}s | buffer={self.buffer_chunks}")
+        print(f"🖥️  GPU:{self.gpu} | encode:{self.preset_x264} crf={self.crf}")
+        print()
+        
+        mpv_launched = False
+        mpv_thread = None
         
         try:
-            # Initialize buffer directories
-            staging_dir, output_dir = self.buffer.initialize_dirs()
-            logger.info(f"Staging: {staging_dir}, Output: {output_dir}")
+            for i in range(n_chunks):
+                if self._stop.is_set():
+                    break
+                
+                chunk_start = i * self.chunk_seconds
+                chunk_end = min((i + 1) * self.chunk_seconds, total_duration)
+                chunk_dur = chunk_end - chunk_start
+                
+                chunk_dir = self.chunks_dir / f"chunk_{i:04d}"
+                input_dir = chunk_dir / "input"
+                output_dir = chunk_dir / "output"
+                chunk_video = self.chunks_dir / f"chunk_{i:04d}.mkv"
+                
+                input_dir.mkdir(parents=True)
+                output_dir.mkdir(parents=True)
+                
+                status = f"[{i+1}/{n_chunks}]"
+                
+                # Step 1: Extract frames
+                print(f"\r  {status} 📦 Extracting {chunk_start:.0f}s-{chunk_end:.0f}s...", end="", flush=True)
+                t1 = time.time()
+                n_frames = self._extract_frames(input_dir, chunk_start, chunk_dur)
+                extract_t = time.time() - t1
+                self.stats.chunks_extracted += 1
+                self.stats.total_frames_in += n_frames
+                self.stats.extract_time += extract_t
+                
+                if n_frames == 0:
+                    logger.warning(f"Chunk {i}: no frames extracted, skipping")
+                    continue
+                
+                target_n = n_frames * self.multiplier
+                
+                # Step 2: RIFE interpolation
+                print(f"\r  {status} ⚡ RIFE {n_frames}→{target_n} frames...          ", end="", flush=True)
+                t2 = time.time()
+                out_frames = self._rife_interpolate(input_dir, output_dir, target_n)
+                rife_t = time.time() - t2
+                self.stats.chunks_interpolated += 1
+                self.stats.total_frames_out += out_frames
+                if rife_t > 0:
+                    self.stats.rife_fps = out_frames / rife_t
+                self.stats.rife_time += rife_t
+                
+                # Step 3: Encode chunk
+                print(f"\r  {status} 🎬 Encoding chunk...                            ", end="", flush=True)
+                t3 = time.time()
+                self._encode_chunk(output_dir, chunk_video, target_fps, info, chunk_start, chunk_dur)
+                encode_t = time.time() - t3
+                self.stats.chunks_encoded += 1
+                self.stats.encode_time += encode_t
+                
+                # Append to playlist
+                with open(self.playlist_path, "a") as f:
+                    f.write(str(chunk_video) + "\n")
+                
+                # Cleanup frame dirs to save disk space
+                shutil.rmtree(input_dir, ignore_errors=True)
+                shutil.rmtree(output_dir, ignore_errors=True)
+                
+                chunk_total = extract_t + rife_t + encode_t
+                fps_str = f"{out_frames/rife_t:.0f}f/s" if rife_t > 0 else "?"
+                print(f"\r  {status} ✅ {chunk_dur:.0f}s done in {chunk_total:.0f}s (RIFE:{fps_str})     ")
+                
+                if self.stats_callback:
+                    self.stats_callback(self.stats)
+                
+                # Launch mpv once we have enough buffer
+                if not mpv_launched and self.stats.chunks_encoded >= self.buffer_chunks:
+                    print(f"\n  🎥 Launching mpv (buffer ready: {self.stats.chunks_encoded} chunks)")
+                    mpv_thread = threading.Thread(target=self._run_mpv, daemon=True)
+                    mpv_thread.start()
+                    mpv_launched = True
+                    self.stats.playback_started = True
             
-            # Reset state
-            self.should_stop.clear()
-            self.stats = StreamStats(start_time=time.time())
+            # All chunks done
+            elapsed = time.time() - t0
+            print(f"\n{'=' * 55}")
+            print(f"✅ All {n_chunks} chunks processed in {elapsed:.0f}s")
+            print(f"📊 {self.stats.total_frames_in}→{self.stats.total_frames_out} frames")
+            print(f"⚡ RIFE avg: {self.stats.total_frames_out/max(self.stats.rife_time,0.1):.0f} frames/s")
             
-            # Start threads
-            self.decode_thread = threading.Thread(
-                target=self._decode_loop,
-                name="FlowForge-Decode",
-                daemon=True
-            )
+            # If mpv not launched yet (very short video), launch now
+            if not mpv_launched and self.stats.chunks_encoded > 0:
+                print(f"\n  🎥 Launching mpv...")
+                mpv_thread = threading.Thread(target=self._run_mpv, daemon=True)
+                mpv_thread.start()
+                mpv_launched = True
             
-            self.interpolation_thread = threading.Thread(
-                target=self._interpolation_loop,
-                name="FlowForge-Interpolate",
-                daemon=True
-            )
-            
-            self.encode_thread = threading.Thread(
-                target=self._encode_loop,
-                name="FlowForge-Encode",
-                args=(output_pipe,),
-                daemon=True
-            )
-            
-            self.stats_thread = threading.Thread(
-                target=self._stats_loop,
-                name="FlowForge-Stats",
-                daemon=True
-            )
-            
-            # Start all threads
-            self.decode_thread.start()
-            self.interpolation_thread.start() 
-            self.encode_thread.start()
-            self.stats_thread.start()
-            
-            self.is_running = True
-            logger.info("Stream processor started successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to start stream processor: {e}")
+            # Wait for mpv to finish
+            if mpv_thread:
+                print("  ⏳ Waiting for mpv to finish playback...")
+                mpv_thread.join()
+                
+        except KeyboardInterrupt:
+            print("\n\n⏹️  Interrupted!")
             self.stop()
-            return False
+        except Exception as e:
+            self.stats.error = str(e)
+            logger.error(f"Pipeline error: {e}", exc_info=True)
+            print(f"\n❌ Error: {e}")
+            raise
+        finally:
+            self._cleanup()
     
     def stop(self) -> None:
-        """Stop streaming interpolation."""
-        if not self.is_running:
+        """Signal the pipeline to stop."""
+        self._stop.set()
+        if self._mpv_proc and self._mpv_proc.poll() is None:
+            self._mpv_proc.terminate()
+    
+    def _extract_frames(self, output_dir: Path, start: float, duration: float) -> int:
+        """Extract frames for a chunk using FFmpeg."""
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", str(start),
+            "-i", str(self.input_path),
+            "-t", str(duration),
+            "-vsync", "0",
+            "-q:v", "2",
+            f"{output_dir}/%08d.png"
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return len(list(output_dir.glob("*.png")))
+    
+    def _rife_interpolate(self, input_dir: Path, output_dir: Path, target_n: int) -> int:
+        """Run RIFE batch interpolation on a chunk."""
+        cmd = [
+            str(self.rife_binary),
+            "-i", to_win_path(str(input_dir)),
+            "-o", to_win_path(str(output_dir)),
+            "-m", to_win_path(str(self.model_dir)),
+            "-g", str(self.gpu),
+            "-n", str(target_n),
+            "-j", self.threads,
+            "-f", "%08d.png",
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr = result.stderr[:500] if result.stderr else "unknown"
+            raise RuntimeError(f"RIFE failed (exit {result.returncode}): {stderr}")
+        
+        return len(list(output_dir.glob("*.png")))
+    
+    def _encode_chunk(
+        self, frames_dir: Path, output_path: Path,
+        fps: float, info: VideoInfo,
+        chunk_start: float, chunk_duration: float
+    ) -> None:
+        """Encode interpolated frames to a chunk video with audio."""
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-framerate", str(fps),
+            "-i", f"{frames_dir}/%08d.png",
+            # Audio from source, time-aligned
+            "-ss", str(chunk_start),
+            "-t", str(chunk_duration),
+            "-i", str(self.input_path),
+            "-map", "0:v",
+            "-map", "1:a",
+            "-c:v", "libx264",
+            "-preset", self.preset_x264,
+            "-crf", str(self.crf),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Encode error: {result.stderr[:500]}")
+            raise RuntimeError(f"FFmpeg encode failed: {result.stderr[:200]}")
+    
+    def _run_mpv(self) -> None:
+        """Launch mpv on the chunk playlist."""
+        # Build playlist in mpv format
+        playlist_entries = []
+        with open(self.playlist_path, "r") as f:
+            playlist_entries = [line.strip() for line in f if line.strip()]
+        
+        if not playlist_entries:
+            logger.error("No chunks to play")
             return
         
-        logger.info("Stopping stream processor...")
-        self.should_stop.set()
-        self.is_running = False
+        # For WSL: need to convert paths and use Windows mpv
+        mpv_str = str(self.mpv_path)
         
-        # Wait for threads to finish
-        threads = [
-            self.decode_thread,
-            self.interpolation_thread,
-            self.encode_thread,
-            self.stats_thread
-        ]
-        
-        for thread in threads:
-            if thread and thread.is_alive():
-                thread.join(timeout=2.0)
-                if thread.is_alive():
-                    logger.warning(f"Thread {thread.name} did not stop gracefully")
-        
-        # Cleanup
-        self.buffer.cleanup()
-        logger.info("Stream processor stopped")
-    
-    def _decode_loop(self) -> None:
-        """Decode input video frames to staging directory."""
-        logger.info("Decode loop started")
-        
-        try:
-            # Build FFmpeg decode command
+        # Build command — play first chunk, then we'll feed more
+        # Use --playlist for sequential playback
+        # Convert playlist paths for Windows if needed
+        if is_wsl() and ".exe" in mpv_str.lower():
+            # Write Windows-path playlist
+            win_playlist = self.work_dir / "playlist_win.txt"
+            with open(win_playlist, "w") as f:
+                for entry in playlist_entries:
+                    f.write(to_win_path(entry) + "\n")
+            
+            # Also check for new chunks added while playing
+            # mpv --playlist will read the file at start; for appending
+            # we'd need IPC. For now, we wait until all chunks are done
+            # then launch mpv.
+            # 
+            # Actually: we re-read the playlist each time we launch.
+            # Better approach: wait for all processing, then play.
+            # But we already buffer, so let's just play what we have
+            # and the user can relaunch for the full thing.
+            
             cmd = [
-                "ffmpeg",
-                "-i", str(self.input_source),
-                "-vf", "fps=24",  # Normalize input FPS for now
-                "-f", "image2",
-                "-vcodec", "png",
-                "-y",  # Overwrite output files
-                f"{self.buffer.staging_dir}/frame_%08d.png"
+                mpv_str,
+                f"--playlist={to_win_path(str(win_playlist))}",
+                "--force-window=yes",
+                "--keep-open=no",
             ]
-            
-            logger.info(f"Starting FFmpeg decode: {' '.join(cmd[:4])} ...")
-            
-            # Start FFmpeg process
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+        else:
+            cmd = [
+                mpv_str,
+                f"--playlist={self.playlist_path}",
+                "--force-window=yes",
+                "--keep-open=no",
+            ]
+        
+        # Add user mpv args
+        cmd.extend(self.mpv_args)
+        
+        logger.info(f"Launching mpv: {cmd[0]} --playlist=...")
+        
+        try:
+            self._mpv_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
-            
-            frame_number = 1
-            
-            # Monitor for new frames
-            while not self.should_stop.is_set():
-                frame_path = self.buffer.staging_dir / f"frame_{frame_number:08d}.png"
-                
-                if frame_path.exists():
-                    # Read frame data
-                    try:
-                        with open(frame_path, 'rb') as f:
-                            frame_data = f.read()
-                        
-                        # Add to buffer
-                        timestamp = time.time()
-                        if self.buffer.add_frame(frame_number, frame_data, timestamp):
-                            # Queue for interpolation
-                            try:
-                                self.decode_queue.put((frame_number, timestamp), timeout=0.1)
-                                self.stats.frames_input += 1
-                            except queue.Full:
-                                self.stats.frames_dropped += 1
-                        
-                        frame_number += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Error reading frame {frame_number}: {e}")
-                        break
-                else:
-                    # Check if FFmpeg is still running
-                    if process.poll() is not None:
-                        # Process finished
-                        break
-                    
-                    # Wait a bit for next frame
-                    time.sleep(0.001)  # 1ms
-            
-            # Cleanup FFmpeg process
-            process.terminate()
-            try:
-                process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            
+            self._mpv_proc.wait()
+            logger.info(f"mpv exited with code {self._mpv_proc.returncode}")
         except Exception as e:
-            logger.error(f"Decode loop error: {e}")
-        
-        logger.info("Decode loop ended")
+            logger.error(f"mpv error: {e}")
     
-    def _interpolation_loop(self) -> None:
-        """Process frame pairs for interpolation."""
-        logger.info("Interpolation loop started")
-        
-        while not self.should_stop.is_set():
-            try:
-                # Get frame for interpolation
-                frame_info = self.decode_queue.get(timeout=0.5)
-                if frame_info is None:
-                    continue
-                
-                frame_number, timestamp = frame_info
-                
-                # Get frame pair
-                pair = self.buffer.get_frame_pair(frame_number)
-                if not pair:
-                    continue
-                
-                frame1_num, frame2_num = pair
-                
-                # Check for scene change (simplified)
-                scene_change = self._detect_scene_change(frame1_num, frame2_num)
-                if scene_change:
-                    self.stats.scene_changes += 1
-                
-                # Decide whether to interpolate
-                should_interpolate = not scene_change or not self.preset.scene_detection
-                
-                if should_interpolate:
-                    # Perform interpolation
-                    start_time = time.time()
-                    
-                    interpolated_frames = self.rife_processor.interpolate_pair(
-                        self.buffer.staging_dir,
-                        self.buffer.output_dir,
-                        frame1_num,
-                        frame2_num
-                    )
-                    
-                    process_time = time.time() - start_time
-                    
-                    if interpolated_frames:
-                        # Queue interpolated frames for encoding
-                        for i, frame_path in enumerate(interpolated_frames):
-                            output_timestamp = timestamp + (i * (1.0 / self.preset.target_fps))
-                            self.interpolation_queue.put((frame_path, output_timestamp))
-                            self.stats.frames_interpolated += 1
-                    else:
-                        # Fallback: use original frames
-                        original_path = self.buffer.get_staging_path(frame1_num)
-                        if original_path:
-                            self.interpolation_queue.put((original_path, timestamp))
-                        
-                else:
-                    # Pass through original frame
-                    original_path = self.buffer.get_staging_path(frame1_num)
-                    if original_path:
-                        self.interpolation_queue.put((original_path, timestamp))
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Interpolation loop error: {e}")
-                continue
-        
-        logger.info("Interpolation loop ended")
-    
-    def _encode_loop(self, output_pipe: Optional[int]) -> None:
-        """Encode interpolated frames and output to mpv."""
-        logger.info("Encode loop started")
-        
-        try:
-            # Build FFmpeg encode command
-            if output_pipe:
-                # Pipe to mpv
-                cmd = [
-                    "ffmpeg",
-                    "-f", "image2pipe",
-                    "-vcodec", "png",
-                    "-r", str(self.preset.target_fps),
-                    "-i", "-",  # Read from stdin
-                    "-f", "rawvideo",
-                    "-pix_fmt", "rgb24",
-                    "-"  # Write to stdout
-                ]
-                
-                # Start FFmpeg encoder
-                encoder = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=output_pipe,
-                    stderr=subprocess.PIPE
-                )
-            else:
-                # For testing, just consume frames
-                encoder = None
-            
-            frame_count = 0
-            last_fps_time = time.time()
-            
-            while not self.should_stop.is_set():
-                try:
-                    # Get interpolated frame
-                    frame_info = self.interpolation_queue.get(timeout=0.5)
-                    if frame_info is None:
-                        continue
-                    
-                    frame_path, timestamp = frame_info
-                    
-                    if encoder:
-                        # Send frame to encoder
-                        try:
-                            with open(frame_path, 'rb') as f:
-                                frame_data = f.read()
-                            encoder.stdin.write(frame_data)
-                            encoder.stdin.flush()
-                        except Exception as e:
-                            logger.error(f"Error encoding frame: {e}")
-                            break
-                    
-                    self.stats.frames_output += 1
-                    frame_count += 1
-                    
-                    # Update output FPS
-                    current_time = time.time()
-                    if current_time - last_fps_time >= 1.0:
-                        self.stats.output_fps = frame_count / (current_time - last_fps_time)
-                        frame_count = 0
-                        last_fps_time = current_time
-                    
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"Encode loop error: {e}")
-                    break
-            
-            # Cleanup encoder
-            if encoder:
-                encoder.stdin.close()
-                encoder.wait(timeout=2.0)
-            
-        except Exception as e:
-            logger.error(f"Encode loop error: {e}")
-        
-        logger.info("Encode loop ended")
-    
-    def _stats_loop(self) -> None:
-        """Statistics monitoring loop."""
-        logger.info("Stats loop started")
-        
-        while not self.should_stop.is_set():
-            try:
-                time.sleep(1.0)  # Update every second
-                
-                # Update system stats
-                try:
-                    process = psutil.Process()
-                    self.stats.cpu_percent = process.cpu_percent()
-                    self.stats.memory_mb = process.memory_info().rss / (1024 * 1024)
-                except:
-                    pass
-                
-                # Update buffer stats
-                self.stats.staging_frames = len(self.buffer.frames)
-                self.stats.output_frames = self.interpolation_queue.qsize()
-                
-                # Calculate processing FPS
-                if self.stats.frames_interpolated > 0:
-                    uptime = self.stats.uptime_seconds
-                    if uptime > 0:
-                        self.stats.processing_fps = self.stats.frames_interpolated / uptime
-                
-                self.stats.last_update = time.time()
-                
-                # Callback
-                if self.stats_callback:
-                    try:
-                        self.stats_callback(self.stats)
-                    except Exception as e:
-                        logger.error(f"Stats callback error: {e}")
-                
-            except Exception as e:
-                logger.error(f"Stats loop error: {e}")
-                time.sleep(1.0)
-        
-        logger.info("Stats loop ended")
-    
-    def _detect_scene_change(self, frame1_num: int, frame2_num: int) -> bool:
-        """Simple scene change detection.
-        
-        Args:
-            frame1_num: First frame number
-            frame2_num: Second frame number
-            
-        Returns:
-            True if scene change detected
-        """
-        # Simplified scene detection based on file size difference
-        try:
-            path1 = self.buffer.get_staging_path(frame1_num)
-            path2 = self.buffer.get_staging_path(frame2_num)
-            
-            if path1 and path2 and path1.exists() and path2.exists():
-                size1 = path1.stat().st_size
-                size2 = path2.stat().st_size
-                
-                # Large size difference indicates scene change
-                size_diff = abs(size1 - size2) / max(size1, size2)
-                return size_diff > self.preset.scene_threshold
-        except:
-            pass
-        
-        return False
-    
-    def get_stats(self) -> StreamStats:
-        """Get current streaming statistics.
-        
-        Returns:
-            Current StreamStats instance
-        """
-        return self.stats
-    
-    def is_healthy(self) -> bool:
-        """Check if stream processor is healthy.
-        
-        Returns:
-            True if processor is running and healthy
-        """
-        if not self.is_running:
-            return False
-        
-        # Check if threads are alive
-        threads = [self.decode_thread, self.interpolation_thread, 
-                  self.encode_thread, self.stats_thread]
-        
-        for thread in threads:
-            if thread and not thread.is_alive():
-                return False
-        
-        # Check for reasonable frame rates
-        if self.stats.uptime_seconds > 5.0:  # After 5 seconds
-            if self.stats.input_fps < 1.0 or self.stats.output_fps < 1.0:
-                return False
-        
-        return True
+    def _cleanup(self) -> None:
+        """Cleanup temporary files."""
+        # Don't cleanup work_dir automatically — user might want to inspect
+        pass
 
 
-def create_stream_processor(
-    preset: InterpolationPreset,
-    input_source: Union[str, Path],
-    rife_binary_path: Optional[Path] = None,
-    stats_callback: Optional[Callable[[StreamStats], None]] = None
-) -> StreamProcessor:
-    """Create and configure a stream processor.
+def realtime_play(
+    input_path: Union[str, Path],
+    *,
+    rife_binary: Optional[Path] = None,
+    model_dir: Optional[Path] = None,
+    mpv_path: Optional[Path] = None,
+    work_dir: Optional[Path] = None,
+    chunk_seconds: int = DEFAULT_CHUNK_SECONDS,
+    buffer_chunks: int = DEFAULT_BUFFER_CHUNKS,
+    multiplier: int = DEFAULT_MULTIPLIER,
+    gpu: int = 0,
+    threads: str = DEFAULT_THREADS,
+    crf: int = 18,
+    mpv_args: Optional[List[str]] = None,
+) -> None:
+    """Convenience function for real-time interpolated playback.
     
-    Args:
-        preset: Interpolation preset
-        input_source: Video input source
-        rife_binary_path: Path to RIFE binary (auto-detected if None)
-        stats_callback: Optional stats callback
-        
-    Returns:
-        Configured StreamProcessor instance
-        
-    Raises:
-        RuntimeError: If RIFE binary not found
+    Auto-detects RIFE binary, model, and mpv paths.
     """
-    # Auto-detect RIFE binary if not provided
-    if not rife_binary_path:
-        import platform
-        is_wsl = "microsoft" in platform.uname().release.lower()
-        
-        common_paths = [
-            Path("/mnt/c/Users/Kad/Desktop/FlowForge/bin/rife-ncnn-vulkan.exe"),
-            Path.home() / ".flowforge" / "bin" / "rife-ncnn-vulkan"
-        ]
-        
-        for path in common_paths:
-            if path.exists():
-                rife_binary_path = path
-                break
-        
-        if not rife_binary_path:
-            raise RuntimeError("RIFE binary not found. Please specify rife_binary_path or run 'flowforge setup'")
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Video not found: {input_path}")
     
-    return StreamProcessor(preset, rife_binary_path, input_source, stats_callback)
+    # Auto-detect paths
+    if not rife_binary:
+        candidates = [
+            Path("/mnt/c/Users/Kad/Desktop/FlowForge/bin/rife-ncnn-vulkan.exe"),
+            Path.home() / ".flowforge" / "bin" / "rife-ncnn-vulkan",
+        ]
+        for c in candidates:
+            if c.exists():
+                rife_binary = c
+                break
+        if not rife_binary:
+            raise RuntimeError("RIFE binary not found")
+    
+    if not model_dir:
+        candidates = [
+            Path("/mnt/c/Users/Kad/Desktop/FlowForge/models/rife-v4.6"),
+            Path.home() / ".flowforge" / "models" / "rife-v4.6",
+        ]
+        for c in candidates:
+            if c.exists():
+                model_dir = c
+                break
+        if not model_dir:
+            raise RuntimeError("RIFE model not found")
+    
+    if not mpv_path:
+        candidates = [
+            Path("/mnt/c/Program Files/SVP 4/mpv64/mpv.exe"),
+            Path("/usr/bin/mpv"),
+        ]
+        for c in candidates:
+            if c.exists():
+                mpv_path = c
+                break
+        if not mpv_path:
+            raise RuntimeError("mpv not found")
+    
+    if not work_dir:
+        work_dir = Path("/mnt/c/Users/Kad/Desktop/FlowForge/realtime_work")
+    
+    processor = ChunkedStreamProcessor(
+        input_path=input_path,
+        rife_binary=rife_binary,
+        model_dir=model_dir,
+        mpv_path=mpv_path,
+        work_dir=work_dir,
+        chunk_seconds=chunk_seconds,
+        buffer_chunks=buffer_chunks,
+        multiplier=multiplier,
+        gpu=gpu,
+        threads=threads,
+        crf=crf,
+        mpv_args=mpv_args,
+    )
+    
+    processor.run()
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="FlowForge Real-Time Playback")
+    parser.add_argument("input", help="Input video file")
+    parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK_SECONDS, help="Chunk duration in seconds (default: 30)")
+    parser.add_argument("--buffer", type=int, default=DEFAULT_BUFFER_CHUNKS, help="Chunks to buffer before playback (default: 2)")
+    parser.add_argument("--multiplier", "-m", type=int, default=DEFAULT_MULTIPLIER, help="FPS multiplier (default: 2)")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU ID (default: 0)")
+    parser.add_argument("--threads", default=DEFAULT_THREADS, help="RIFE threads (default: 1:3:3)")
+    parser.add_argument("--crf", type=int, default=18, help="Encode quality (default: 18)")
+    parser.add_argument("--mpv-args", nargs="*", default=[], help="Extra mpv arguments")
+    
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    
+    realtime_play(
+        args.input,
+        chunk_seconds=args.chunk,
+        buffer_chunks=args.buffer,
+        multiplier=args.multiplier,
+        gpu=args.gpu,
+        threads=args.threads,
+        crf=args.crf,
+        mpv_args=args.mpv_args,
+    )
