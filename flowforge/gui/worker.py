@@ -18,6 +18,29 @@ from PyQt6.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker
 from .settings import settings
 
 
+def _find_tool(name: str) -> str:
+    """Find ffprobe/ffmpeg/rife binary, checking FlowForge bin dirs first."""
+    import sys
+    if getattr(sys, 'frozen', False):
+        app_dir = Path(sys.executable).parent
+    else:
+        app_dir = Path(__file__).resolve().parent.parent.parent
+    
+    candidates = [
+        app_dir / "bin" / f"{name}.exe",
+        app_dir / "bin" / name,
+        Path(rf"C:\Users\Kad\Desktop\FlowForge\bin\{name}.exe"),
+        Path.home() / ".flowforge" / "bin" / f"{name}.exe",
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                return str(c)
+        except (PermissionError, OSError):
+            continue
+    return name  # fallback to PATH
+
+
 class VideoProcessorWorker(QThread):
     """Background worker for RIFE video processing."""
     
@@ -164,7 +187,7 @@ class VideoProcessorWorker(QThread):
         """Get video metadata using ffprobe."""
         try:
             cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
+                _find_tool("ffprobe"), "-v", "quiet", "-print_format", "json",
                 "-show_streams", "-show_format", str(self.input_path)
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -225,7 +248,7 @@ class VideoProcessorWorker(QThread):
         """Extract frames from input video."""
         try:
             cmd = [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                _find_tool("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(self.input_path),
                 "-vsync", "0", "-q:v", "2",
                 f"{self.frames_in}/%08d.png"
@@ -332,7 +355,7 @@ class VideoProcessorWorker(QThread):
             crf = self.crf if self.crf != 18 else default_crf
             
             cmd = [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                _find_tool("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                 "-framerate", str(fps),
                 "-i", f"{self.frames_out}/%08d.png",
                 "-i", str(self.input_path),  # For audio

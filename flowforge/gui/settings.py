@@ -20,7 +20,20 @@ class FlowForgeSettings:
         self._settings: Dict[str, Any] = {}
         self._load_settings()
         self._detect_platform()
+        self._add_bundled_tools_to_path()
         self._auto_detect_paths()
+    
+    def _add_bundled_tools_to_path(self) -> None:
+        """Add FlowForge bin directory to PATH so ffprobe/ffmpeg are found."""
+        bin_dirs = [
+            "C:\\Users\\Kad\\Desktop\\FlowForge\\bin",
+            str(Path.home() / ".flowforge" / "bin"),
+        ]
+        current_path = os.environ.get("PATH", "")
+        for d in bin_dirs:
+            if d not in current_path and Path(d).exists():
+                os.environ["PATH"] = d + os.pathsep + current_path
+                current_path = os.environ["PATH"]
     
     def _load_settings(self) -> None:
         """Load settings from config file."""

@@ -251,11 +251,32 @@ class VideoDropZone(QWidget):
             self.status_label.setText("❌")
             self._current_file = None
     
+    def _find_ffprobe(self) -> str:
+        """Find ffprobe binary."""
+        import sys
+        # Check next to the exe / script
+        if getattr(sys, 'frozen', False):
+            app_dir = Path(sys.executable).parent
+        else:
+            app_dir = Path(__file__).resolve().parent.parent.parent.parent
+        
+        candidates = [
+            app_dir / "bin" / "ffprobe.exe",
+            app_dir / "bin" / "ffprobe",
+            Path(r"C:\Users\Kad\Desktop\FlowForge\bin\ffprobe.exe"),
+            Path.home() / ".flowforge" / "bin" / "ffprobe.exe",
+        ]
+        for c in candidates:
+            if c.exists():
+                return str(c)
+        return "ffprobe"  # fallback to PATH
+
     def _get_video_info(self, file_path: Path) -> Optional[dict]:
         """Get video metadata using ffprobe."""
         try:
+            ffprobe = self._find_ffprobe()
             cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
+                ffprobe, "-v", "quiet", "-print_format", "json",
                 "-show_streams", "-show_format", str(file_path)
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
