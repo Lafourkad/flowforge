@@ -213,7 +213,9 @@ class FlowForgeSettings:
     def get_gpu_info(self) -> Dict[str, Any]:
         """Get GPU information using nvidia-smi."""
         try:
-            cmd = ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]
+            # nvidia-smi is in System32 on Windows
+            smi = r"C:\Windows\System32\nvidia-smi.exe" if platform.system() == "Windows" else "nvidia-smi"
+            cmd = [smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             
             if result.returncode == 0:

@@ -404,6 +404,7 @@ class PlaybackWorker(QThread):
         self.video_path: Optional[Path] = None
         self.preset: str = "Film (24→60fps)"
         self.custom_fps: float = 60.0
+        self.gpu_id: int = 0
         self.gpu_threads: int = 2
         self.scene_detection: bool = True
         self.scene_threshold: float = 0.3
@@ -444,11 +445,13 @@ class PlaybackWorker(QThread):
             with open(temp_vs, 'w', encoding='utf-8') as f:
                 f.write(vs_script)
             
-            # Launch mpv
+            # Launch mpv with VapourSynth filter
             cmd = [
                 mpv_path,
-                f"--demuxer-lavf-o=video_path={str(self.video_path)}",
-                str(temp_vs)
+                "--no-config",
+                "--hwdec=no",
+                f"--vf=vapoursynth:{str(temp_vs)}",
+                str(self.video_path),
             ]
             
             subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0)
