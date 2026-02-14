@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlowForge — Open-Source Video Frame Interpolation</title>
+    <meta name="description" content="Free, GPU-accelerated frame interpolation. Turn 24fps video into buttery smooth 60fps+. Open-source alternative to SVP 4 Pro.">
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --text: #e4e4ef;
+            --muted: #8888a0;
+            --accent: #6c5ce7;
+            --accent2: #00b894;
+            --gradient: linear-gradient(135deg, #6c5ce7, #00b894);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        
+        /* Hero */
+        .hero {
+            min-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+            position: relative;
+            overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(ellipse at 30% 20%, rgba(108,92,231,0.08) 0%, transparent 50%),
+                        radial-gradient(ellipse at 70% 80%, rgba(0,184,148,0.06) 0%, transparent 50%);
+            animation: float 20s ease-in-out infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(-2%, 2%); }
+        }
+        .hero > * { position: relative; z-index: 1; }
+        .logo { font-size: 4rem; font-weight: 800; margin-bottom: 0.5rem; }
+        .logo span { background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .tagline { font-size: 1.4rem; color: var(--muted); max-width: 600px; margin-bottom: 2rem; }
+        .badges { display: flex; gap: 0.5rem; margin-bottom: 2rem; flex-wrap: wrap; justify-content: center; }
+        .badge {
+            padding: 0.3rem 0.8rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .badge.green { border-color: #00b894; color: #00b894; }
+        .badge.purple { border-color: #6c5ce7; color: #6c5ce7; }
+        .cta-group { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+        .btn {
+            padding: 0.8rem 2rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); text-decoration: none; }
+        .btn-primary { background: var(--gradient); color: white; }
+        .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+
+        /* Code block */
+        .code-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem 2rem;
+            margin: 2rem auto;
+            max-width: 600px;
+            text-align: left;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+            color: var(--accent2);
+            position: relative;
+        }
+        .code-block .comment { color: var(--muted); }
+
+        /* Features */
+        .features {
+            padding: 4rem 2rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+        .section-title {
+            text-align: center;
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 3rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            transition: border-color 0.3s;
+        }
+        .card:hover { border-color: var(--accent); }
+        .card .icon { font-size: 2rem; margin-bottom: 1rem; }
+        .card h3 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+        .card p { color: var(--muted); font-size: 0.95rem; }
+
+        /* Comparison */
+        .comparison {
+            padding: 4rem 2rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 2rem;
+        }
+        th, td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th { color: var(--muted); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; }
+        .check { color: var(--accent2); }
+        .cross { color: #e74c3c; }
+
+        /* Performance */
+        .perf {
+            padding: 4rem 2rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .bar-group { margin-bottom: 1.5rem; }
+        .bar-label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; font-size: 0.9rem; }
+        .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 4px; background: var(--gradient); transition: width 1s ease; }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 3rem 2rem;
+            color: var(--muted);
+            border-top: 1px solid var(--border);
+            margin-top: 4rem;
+        }
+        footer a { color: var(--accent); }
+
+        @media (max-width: 600px) {
+            .logo { font-size: 2.5rem; }
+            .tagline { font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Hero -->
+<section class="hero">
+    <div class="logo">🎬 <span>FlowForge</span></div>
+    <p class="tagline">
+        Free, GPU-accelerated video frame interpolation.<br>
+        Turn choppy 24fps into buttery smooth 60fps+.
+    </p>
+    <div class="badges">
+        <span class="badge green">✓ Open Source</span>
+        <span class="badge purple">✓ GPU Accelerated</span>
+        <span class="badge green">✓ NVIDIA RTX</span>
+        <span class="badge purple">✓ Cross-Platform</span>
+    </div>
+    <div class="code-block">
+        <span class="comment"># Install and interpolate in 2 commands</span><br>
+        pip install flowforge && flowforge setup<br>
+        flowforge interpolate movie.mkv -o smooth.mkv --fps 60
+    </div>
+    <div class="cta-group">
+        <a href="https://github.com/Lafourkad/flowforge" class="btn btn-primary">
+            ⭐ GitHub
+        </a>
+        <a href="https://github.com/Lafourkad/flowforge#-quick-start" class="btn btn-secondary">
+            📖 Documentation
+        </a>
+    </div>
+</section>
+
+<!-- Features -->
+<section class="features">
+    <h2 class="section-title">Features</h2>
+    <div class="grid">
+        <div class="card">
+            <div class="icon">⚡</div>
+            <h3>GPU Accelerated</h3>
+            <p>Vulkan backend works with NVIDIA, AMD, and Intel GPUs. No CUDA toolkit needed — just plug and play.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🧠</div>
+            <h3>RIFE Neural Network</h3>
+            <p>State-of-the-art frame interpolation using Real-Time Intermediate Flow Estimation. Smooth, artifact-free results.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🎬</div>
+            <h3>Scene Detection</h3>
+            <p>Smart scene change detection prevents ghosting artifacts at cuts. No more blended transitions.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🎮</div>
+            <h3>Presets</h3>
+            <p>Film, anime, sports, and custom profiles. Each tuned for different content types and motion patterns.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🔄</div>
+            <h3>Real-Time Playback</h3>
+            <p>Watch any video with live interpolation via mpv integration. No pre-processing needed.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🆓</div>
+            <h3>100% Free & Open Source</h3>
+            <p>MIT licensed. No subscriptions, no API keys, no cloud dependency. Your GPU, your frames.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Comparison -->
+<section class="comparison">
+    <h2 class="section-title">FlowForge vs SVP 4 Pro</h2>
+    <table>
+        <thead>
+            <tr><th>Feature</th><th>FlowForge</th><th>SVP 4 Pro</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Price</td><td class="check">Free</td><td class="cross">$24.99</td></tr>
+            <tr><td>Open Source</td><td class="check">✓ MIT License</td><td class="cross">✗ Proprietary</td></tr>
+            <tr><td>GPU Acceleration</td><td class="check">✓ Vulkan</td><td class="check">✓ OpenCL/Vulkan</td></tr>
+            <tr><td>RIFE Neural Network</td><td class="check">✓ Built-in</td><td class="check">✓ Plugin</td></tr>
+            <tr><td>Real-Time Playback</td><td class="check">✓ mpv</td><td class="check">✓ mpv/MPC/VLC</td></tr>
+            <tr><td>Scene Detection</td><td class="check">✓</td><td class="check">✓</td></tr>
+            <tr><td>CLI / Batch Processing</td><td class="check">✓ Native</td><td class="cross">✗ GUI only</td></tr>
+            <tr><td>Linux Support</td><td class="check">✓ Native</td><td class="check">✓ Free version</td></tr>
+            <tr><td>Custom Presets</td><td class="check">✓</td><td class="check">✓</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<!-- Performance -->
+<section class="perf">
+    <h2 class="section-title">Performance (RTX 4070)</h2>
+    <div class="bar-group">
+        <div class="bar-label"><span>1080p 2x (24→48fps)</span><span>~28 fps</span></div>
+        <div class="bar"><div class="bar-fill" style="width: 93%"></div></div>
+    </div>
+    <div class="bar-group">
+        <div class="bar-label"><span>1080p 4x (24→96fps)</span><span>~15 fps</span></div>
+        <div class="bar"><div class="bar-fill" style="width: 50%"></div></div>
+    </div>
+    <div class="bar-group">
+        <div class="bar-label"><span>4K 2x (24→48fps)</span><span>~12 fps</span></div>
+        <div class="bar"><div class="bar-fill" style="width: 40%"></div></div>
+    </div>
+    <div class="bar-group">
+        <div class="bar-label"><span>720p 2x (30→60fps)</span><span>~45 fps ⚡</span></div>
+        <div class="bar"><div class="bar-fill" style="width: 100%"></div></div>
+    </div>
+    <p style="text-align: center; color: var(--muted); margin-top: 1rem; font-size: 0.85rem;">
+        Real-time playback requires processing speed ≥ target FPS
+    </p>
+</section>
+
+<footer>
+    <p>
+        <a href="https://github.com/Lafourkad/flowforge">GitHub</a> · 
+        <a href="https://github.com/Lafourkad/flowforge/blob/main/LICENSE">MIT License</a> · 
+        Built with 🧠 RIFE + 🔥 Vulkan
+    </p>
+    <p style="margin-top: 0.5rem; font-size: 0.8rem;">© 2026 FlowForge Contributors</p>
+</footer>
+
+</body>
+</html>
