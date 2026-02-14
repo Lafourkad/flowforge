@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowforge"
+description = "High-quality video frame interpolation using RIFE"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "FlowForge Team", email = "contact@flowforge.dev"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "click>=8.0.0",
+    "tqdm>=4.64.0",
+    "Pillow>=9.0.0",
+    "opencv-python>=4.6.0",
+    "requests>=2.28.0",
+    "scikit-image>=0.19.0",
+    "numpy>=1.21.0",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/flowforge/flowforge"
+Documentation = "https://github.com/flowforge/flowforge#readme"
+Repository = "https://github.com/flowforge/flowforge.git"
+"Bug Tracker" = "https://github.com/flowforge/flowforge/issues"
+
+[project.scripts]
+flowforge = "flowforge.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "flake8>=4.0",
+    "mypy>=0.900",
+]
+
+[tool.setuptools_scm]
+write_to = "flowforge/_version.py"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
