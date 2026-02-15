@@ -1,26 +1,26 @@
 """
-FlowForge GUI Main Entry Point
-Runnable with: python -m flowforge.gui
+RIFE Player GUI Main Entry Point
+VLC-style video player with RIFE interpolation.
 """
 
 import sys
 from typing import Optional
 
 from .app import create_application
-from .main_window import FlowForgeMainWindow
+from .player import FlowForgePlayer
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """Main entry point for FlowForge GUI."""
+    """Main entry point for RIFE Player GUI."""
     if argv is None:
         argv = sys.argv
     
-    # Create application
+    # Create application with dark theme
     app = create_application(argv)
     
-    # Create and show main window
-    window = FlowForgeMainWindow()
-    window.show()
+    # Create and show main player window
+    player = FlowForgePlayer()
+    player.show()
     
     # Run event loop
     return app.exec()

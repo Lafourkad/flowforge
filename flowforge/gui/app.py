@@ -1,6 +1,6 @@
 """
-FlowForge GUI Application Setup
-Modern dark theme and application initialization.
+RIFE Player GUI Application Setup
+VLC-style dark theme and application initialization.
 """
 
 import sys
@@ -11,165 +11,171 @@ from PyQt6.QtGui import QFont, QPalette, QColor
 
 
 class FlowForgeApplication(QApplication):
-    """Custom QApplication with dark theme and app-specific settings."""
+    """Custom QApplication with VLC-style dark theme."""
     
     def __init__(self, argv: list[str]):
         super().__init__(argv)
         
         # Set application properties
-        self.setApplicationName("FlowForge")
+        self.setApplicationName("RIFE Player")
         self.setApplicationVersion("1.0.0")
         self.setOrganizationName("FlowForge")
         self.setOrganizationDomain("flowforge.ai")
         
-        # Apply dark theme
-        self._setup_dark_theme()
+        # Apply VLC-style dark theme
+        self._setup_vlc_theme()
         
-        # Set font
+        # Set modern font
         font = QFont("Segoe UI", 9)
         font.setHintingPreference(QFont.HintingPreference.PreferDefaultHinting)
         self.setFont(font)
     
-    def _setup_dark_theme(self) -> None:
-        """Apply a modern dark theme similar to DaVinci Resolve / HandBrake."""
-        # Set style to Fusion for better customization
+    def _setup_vlc_theme(self) -> None:
+        """Apply VLC-inspired dark theme."""
         self.setStyle("Fusion")
         
-        # Define color palette
-        dark_palette = QPalette()
+        # VLC-style color palette
+        palette = QPalette()
         
-        # Base colors
-        base_color = QColor(37, 37, 37)          # #252525 - main background
-        alt_base_color = QColor(45, 45, 45)      # #2d2d2d - alternate background
-        text_color = QColor(220, 220, 220)       # #dcdcdc - main text
-        disabled_text = QColor(127, 127, 127)    # #7f7f7f - disabled text
-        highlight_color = QColor(42, 130, 218)   # #2a82da - selection/accent
-        button_color = QColor(53, 53, 53)        # #353535 - buttons
-        window_color = QColor(32, 32, 32)        # #202020 - window background
+        # Main colors - VLC inspired
+        background = QColor(30, 30, 30)          # #1e1e1e - main background
+        panel = QColor(45, 45, 45)               # #2d2d2d - panels
+        accent = QColor(0, 120, 212)             # #0078d4 - VLC blue accent
+        text = QColor(255, 255, 255)             # White text
+        disabled_text = QColor(128, 128, 128)    # Disabled text
+        highlight = QColor(0, 120, 212)          # Selection highlight
+        button = QColor(45, 45, 45)              # Button background
+        border = QColor(60, 60, 60)              # Borders
         
-        # Set palette colors
-        dark_palette.setColor(QPalette.ColorRole.Window, window_color)
-        dark_palette.setColor(QPalette.ColorRole.WindowText, text_color)
-        dark_palette.setColor(QPalette.ColorRole.Base, base_color)
-        dark_palette.setColor(QPalette.ColorRole.AlternateBase, alt_base_color)
-        dark_palette.setColor(QPalette.ColorRole.ToolTipBase, base_color)
-        dark_palette.setColor(QPalette.ColorRole.ToolTipText, text_color)
-        dark_palette.setColor(QPalette.ColorRole.Text, text_color)
-        dark_palette.setColor(QPalette.ColorRole.Button, button_color)
-        dark_palette.setColor(QPalette.ColorRole.ButtonText, text_color)
-        dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
-        dark_palette.setColor(QPalette.ColorRole.Link, highlight_color)
-        dark_palette.setColor(QPalette.ColorRole.Highlight, highlight_color)
-        dark_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
+        # Window colors
+        palette.setColor(QPalette.ColorRole.Window, background)
+        palette.setColor(QPalette.ColorRole.WindowText, text)
+        
+        # Base colors (for input fields, lists, etc.)
+        palette.setColor(QPalette.ColorRole.Base, background)
+        palette.setColor(QPalette.ColorRole.AlternateBase, panel)
+        palette.setColor(QPalette.ColorRole.Text, text)
+        
+        # Button colors
+        palette.setColor(QPalette.ColorRole.Button, button)
+        palette.setColor(QPalette.ColorRole.ButtonText, text)
+        
+        # Selection colors
+        palette.setColor(QPalette.ColorRole.Highlight, highlight)
+        palette.setColor(QPalette.ColorRole.HighlightedText, text)
         
         # Disabled colors
-        dark_palette.setColor(QPalette.ColorGroup.Disabled, 
-                            QPalette.ColorRole.WindowText, disabled_text)
-        dark_palette.setColor(QPalette.ColorGroup.Disabled, 
-                            QPalette.ColorRole.Text, disabled_text)
-        dark_palette.setColor(QPalette.ColorGroup.Disabled, 
-                            QPalette.ColorRole.ButtonText, disabled_text)
-        dark_palette.setColor(QPalette.ColorGroup.Disabled, 
-                            QPalette.ColorRole.Highlight, QColor(80, 80, 80))
-        dark_palette.setColor(QPalette.ColorGroup.Disabled, 
-                            QPalette.ColorRole.HighlightedText, disabled_text)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_text)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
         
-        self.setPalette(dark_palette)
+        self.setPalette(palette)
         
-        # Additional stylesheet for fine-tuning
+        # Additional stylesheet for modern look
         self.setStyleSheet("""
-            QToolTip {
-                color: #ffffff;
-                background-color: #2b2b2b;
-                border: 1px solid #5a5a5a;
-                border-radius: 3px;
-                padding: 4px;
-                opacity: 200;
+            QMainWindow {
+                background-color: #1e1e1e;
             }
             
             QMenuBar {
-                background-color: #2b2b2b;
-                color: #dcdcdc;
+                background-color: #2d2d2d;
                 border-bottom: 1px solid #3c3c3c;
+                padding: 2px;
             }
             
             QMenuBar::item {
                 background: transparent;
                 padding: 4px 8px;
+                border-radius: 3px;
             }
             
             QMenuBar::item:selected {
-                background: #404040;
-                border-radius: 3px;
+                background-color: #0078d4;
             }
             
             QMenu {
-                background-color: #2b2b2b;
-                color: #dcdcdc;
+                background-color: #2d2d2d;
                 border: 1px solid #3c3c3c;
+                padding: 4px;
             }
             
             QMenu::item {
-                padding: 6px 16px;
+                padding: 6px 20px 6px 8px;
+                border-radius: 3px;
             }
             
             QMenu::item:selected {
-                background-color: #2a82da;
+                background-color: #0078d4;
             }
             
-            QStatusBar {
-                background-color: #2b2b2b;
-                color: #dcdcdc;
-                border-top: 1px solid #3c3c3c;
+            QMenu::separator {
+                height: 1px;
+                background: #3c3c3c;
+                margin: 4px 0px;
             }
             
-            QProgressBar {
+            QToolBar {
+                background-color: #2d2d2d;
+                border: none;
+                spacing: 4px;
+                padding: 4px;
+            }
+            
+            QToolButton {
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 6px;
+                min-width: 60px;
+            }
+            
+            QToolButton:hover {
+                background-color: #404040;
+                border-color: #5c5c5c;
+            }
+            
+            QToolButton:pressed {
+                background-color: #0078d4;
+            }
+            
+            QToolButton:checked {
+                background-color: #0078d4;
+                border-color: #106ebe;
+            }
+            
+            QPushButton {
+                background-color: #2d2d2d;
                 border: 1px solid #3c3c3c;
                 border-radius: 4px;
-                text-align: center;
-                background-color: #252525;
+                padding: 6px 12px;
+                min-height: 20px;
             }
             
-            QProgressBar::chunk {
-                background-color: #2a82da;
-                border-radius: 3px;
-                margin: 1px;
+            QPushButton:hover {
+                background-color: #404040;
+                border-color: #5c5c5c;
             }
             
-            QSlider::groove:horizontal {
-                border: 1px solid #3c3c3c;
-                height: 6px;
-                background: #252525;
-                border-radius: 3px;
+            QPushButton:pressed {
+                background-color: #0078d4;
             }
             
-            QSlider::handle:horizontal {
-                background: #2a82da;
-                border: 1px solid #1a6bb8;
-                width: 14px;
-                height: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-            }
-            
-            QSlider::handle:horizontal:hover {
-                background: #3a92da;
-            }
-            
-            QSpinBox, QDoubleSpinBox {
-                background-color: #353535;
-                border: 1px solid #3c3c3c;
-                border-radius: 3px;
-                padding: 2px 4px;
-                selection-background-color: #2a82da;
+            QPushButton:disabled {
+                background-color: #1a1a1a;
+                border-color: #2c2c2c;
+                color: #808080;
             }
             
             QComboBox {
-                background-color: #353535;
+                background-color: #2d2d2d;
                 border: 1px solid #3c3c3c;
-                border-radius: 3px;
-                padding: 2px 8px;
-                selection-background-color: #2a82da;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 20px;
+            }
+            
+            QComboBox:hover {
+                border-color: #5c5c5c;
             }
             
             QComboBox::drop-down {
@@ -178,25 +184,82 @@ class FlowForgeApplication(QApplication):
             }
             
             QComboBox::down-arrow {
-                image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAYAAABCxiV9AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAABHSURBVAiZY/z//z8DLsD4//9/BiYGBgYmIF0k8x8E4YpB+ljSCJ3Y0kjSyNIgNpI0sjSSNJI0sjSyNJI0sjSSNJI0slwDAJ5lJAOyG2zpAAAAAElFTkSuQmCC);
-                width: 7px;
-                height: 4px;
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid #ffffff;
+                margin-right: 6px;
             }
             
             QComboBox QAbstractItemView {
-                background-color: #2b2b2b;
+                background-color: #2d2d2d;
                 border: 1px solid #3c3c3c;
-                color: #dcdcdc;
-                selection-background-color: #2a82da;
+                selection-background-color: #0078d4;
+            }
+            
+            QSpinBox, QDoubleSpinBox {
+                background-color: #2d2d2d;
+                border: 1px solid #3c3c3c;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 20px;
+            }
+            
+            QSpinBox:hover, QDoubleSpinBox:hover {
+                border-color: #5c5c5c;
+            }
+            
+            QCheckBox {
+                spacing: 8px;
+            }
+            
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #3c3c3c;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+            }
+            
+            QCheckBox::indicator:hover {
+                border-color: #5c5c5c;
+            }
+            
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border-color: #106ebe;
+                image: none;
+            }
+            
+            QLabel {
+                color: #ffffff;
+                background: transparent;
+            }
+            
+            QScrollBar:vertical {
+                background-color: #1e1e1e;
+                width: 12px;
+                border: none;
+            }
+            
+            QScrollBar::handle:vertical {
+                background-color: #404040;
+                border-radius: 6px;
+                min-height: 20px;
+                margin: 2px;
+            }
+            
+            QScrollBar::handle:vertical:hover {
+                background-color: #5c5c5c;
+            }
+            
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
             }
         """)
 
 
-def create_application(argv: Optional[list[str]] = None) -> FlowForgeApplication:
-    """Create and configure the FlowForge application."""
-    if argv is None:
-        argv = sys.argv
-    
-    # High-DPI is enabled by default in Qt6
-    app = FlowForgeApplication(argv)
-    return app
+def create_application(argv: list[str]) -> FlowForgeApplication:
+    """Create and configure the RIFE Player application."""
+    return FlowForgeApplication(argv)
